@@ -4,10 +4,9 @@
     src="https://user-images.githubusercontent.com/6550035/46709024-9b23ad00-cbf6-11e8-9fb2-ca8b20b7dbec.jpg"
     width="408px" border="0" alt="croc">
 <br>
-<a href="https://github.com/schollz/croc/releases/latest"><img src="https://img.shields.io/badge/version-v9.6.17-brightgreen.svg?style=flat-square" alt="Version"></a>
-<a href="https://coveralls.io/github/schollz/croc"><img src="https://img.shields.io/badge/coverage-81%25-green.svg?style=flat-square" alt="Coverage"></a>
-<a href="https://travis-ci.org/schollz/croc"><img
-src="https://img.shields.io/travis/schollz/croc.svg?style=flat-square" alt="Build
+<a href="https://github.com/schollz/croc/releases/latest"><img src="https://img.shields.io/badge/version-v10.0.9-brightgreen.svg?style=flat-square" alt="Version"></a>
+<a href="https://github.com/schollz/croc/actions/workflows/ci.yml"><img
+src="https://github.com/schollz/croc/actions/workflows/ci.yml/badge.svg" alt="Build
 Status"></a> 
 <p align="center">This project is supported by <a href="https://github.com/sponsors/schollz">Github sponsors</a>.</p>
 
@@ -108,7 +107,7 @@ pkg install croc
 Or, you can [install Go](https://golang.org/dl/) and build from source (requires Go 1.17+): 
 
 ```
-go install github.com/schollz/croc/v9@latest
+go install github.com/schollz/croc/v10@latest
 ```
 
 On Android there is a 3rd party F-Droid app [available to download](https://f-droid.org/en/packages/com.github.howeyc.crocgui/).

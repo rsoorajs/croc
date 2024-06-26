@@ -28,13 +28,13 @@ import (
 	"github.com/schollz/peerdiscovery"
 	"github.com/schollz/progressbar/v3"
 
-	"github.com/schollz/croc/v9/src/comm"
-	"github.com/schollz/croc/v9/src/compress"
-	"github.com/schollz/croc/v9/src/crypt"
-	"github.com/schollz/croc/v9/src/message"
-	"github.com/schollz/croc/v9/src/models"
-	"github.com/schollz/croc/v9/src/tcp"
-	"github.com/schollz/croc/v9/src/utils"
+	"github.com/schollz/croc/v10/src/comm"
+	"github.com/schollz/croc/v10/src/compress"
+	"github.com/schollz/croc/v10/src/crypt"
+	"github.com/schollz/croc/v10/src/message"
+	"github.com/schollz/croc/v10/src/models"
+	"github.com/schollz/croc/v10/src/tcp"
+	"github.com/schollz/croc/v10/src/utils"
 )
 
 var (
@@ -196,9 +196,7 @@ func New(ops Options) (c *Client, err error) {
 		return
 	}
 	// Create a hash of part of the shared secret to use as the room name
-	// add the current day and "croc" to the shared secret to make more resistant
-	// to rainbow tables
-	hashExtra := "croc" + time.Now().Format("2006-01-02")
+	hashExtra := "croc"
 	roomNameBytes := sha256.Sum256([]byte(c.Options.SharedSecret[:4] + hashExtra))
 	c.Options.RoomName = hex.EncodeToString(roomNameBytes[:])
 
@@ -508,7 +506,7 @@ func (c *Client) sendCollectFiles(filesInfo []FileInfo) (err error) {
 			c.Options.HashAlgorithm = "xxhash"
 		}
 
-		c.FilesToTransfer[i].Hash, err = utils.HashFile(fullPath, c.Options.HashAlgorithm)
+		c.FilesToTransfer[i].Hash, err = utils.HashFile(fullPath, c.Options.HashAlgorithm, fileInfo.Size > 1e7)
 		log.Debugf("hashed %s to %x using %s", fullPath, c.FilesToTransfer[i].Hash, c.Options.HashAlgorithm)
 		totalFilesSize += fileInfo.Size
 		if err != nil {
@@ -702,26 +700,33 @@ func (c *Client) Send(filesInfo []FileInfo, emptyFoldersToTransfer []FileInfo, t
 			log.Debugf("banner: %s", banner)
 			log.Debugf("connection established: %+v", conn)
 			var kB []byte
-			var dataMessage SimpleMessage
 			B, _ := pake.InitCurve([]byte(c.Options.SharedSecret[5:]), 1, c.Options.Curve)
 			for {
-				log.Debug("waiting for bytes")
+				var dataMessage SimpleMessage
+				log.Trace("waiting for bytes")
 				data, errConn := conn.Receive()
 				if errConn != nil {
-					log.Debugf("[%+v] had error: %s", conn, errConn.Error())
+					log.Tracef("[%+v] had error: %s", conn, errConn.Error())
 				}
-				err = json.Unmarshal(data, &dataMessage)
-				if err == nil {
-					log.Debugf("dataMessage: %s", dataMessage)
-				}
+				json.Unmarshal(data, &dataMessage)
+				log.Tracef("data: %+v '%s'", data, data)
+				log.Tracef("dataMessage: %s", dataMessage)
+				log.Tracef("kB: %x", kB)
 				// if kB not null, then use it to decrypt
 				if kB != nil {
-					data, err = crypt.Decrypt(data, kB)
-					if err != nil {
-						log.Debugf("error decrypting: %v", err)
+					var decryptErr error
+					var dataDecrypt []byte
+					dataDecrypt, decryptErr = crypt.Decrypt(data, kB)
+					if decryptErr != nil {
+						log.Tracef("error decrypting: %v: '%s'", decryptErr, data)
+					} else {
+						// copy dataDecrypt to data
+						data = dataDecrypt
+						log.Tracef("decrypted: %s", data)
 					}
 				}
 				if bytes.Equal(data, ipRequest) {
+					log.Tracef("got ipRequest")
 					// recipient wants to try to connect to local ips
 					var ips []string
 					// only get local ips if the local is enabled
@@ -729,38 +734,48 @@ func (c *Client) Send(filesInfo []FileInfo, emptyFoldersToTransfer []FileInfo, t
 						// get list of local ips
 						ips, err = utils.GetLocalIPs()
 						if err != nil {
-							log.Debugf("error getting local ips: %v", err)
+							log.Tracef("error getting local ips: %v", err)
 						}
 						// prepend the port that is being listened to
 						ips = append([]string{c.Options.RelayPorts[0]}, ips...)
 					}
-					bips, _ := json.Marshal(ips)
-					bips, _ = crypt.Encrypt(bips, kB)
+					log.Tracef("sending ips: %+v", ips)
+					bips, errIps := json.Marshal(ips)
+					if errIps != nil {
+						log.Tracef("error marshalling ips: %v", errIps)
+					}
+					bips, errIps = crypt.Encrypt(bips, kB)
+					if errIps != nil {
+						log.Tracef("error encrypting ips: %v", errIps)
+					}
 					if err = conn.Send(bips); err != nil {
 						log.Errorf("error sending: %v", err)
 					}
 				} else if dataMessage.Kind == "pake1" {
-					err = B.Update(dataMessage.Bytes)
-					if err == nil {
-						kB, err = B.SessionKey()
-						if err == nil {
-							log.Debugf("dataMessage kB: %x", kB)
+					log.Trace("got pake1")
+					var pakeError error
+					pakeError = B.Update(dataMessage.Bytes)
+					if pakeError == nil {
+						kB, pakeError = B.SessionKey()
+						if pakeError == nil {
+							log.Tracef("dataMessage kB: %x", kB)
 							dataMessage.Bytes = B.Bytes()
 							dataMessage.Kind = "pake2"
 							data, _ = json.Marshal(dataMessage)
-							if err = conn.Send(data); err != nil {
+							if pakeError = conn.Send(data); err != nil {
 								log.Errorf("dataMessage error sending: %v", err)
 							}
 						}
 
 					}
 				} else if bytes.Equal(data, handshakeRequest) {
+					log.Trace("got handshake")
 					break
 				} else if bytes.Equal(data, []byte{1}) {
-					log.Debug("got ping")
+					log.Trace("got ping")
 					continue
 				} else {
-					log.Debugf("[%+v] got weird bytes: %+v", conn, data)
+					log.Tracef("[%+v] got weird bytes: %+v", conn, data)
 					// throttle the reading
 					errchan <- fmt.Errorf("gracefully refusing using the public relay")
 					return
@@ -1049,7 +1064,7 @@ func (c *Client) Receive() (err error) {
 	err = c.transfer()
 	if err == nil {
 		if c.numberOfTransferredFiles+len(c.EmptyFoldersToTransfer) == 0 {
-			fmt.Fprintf(os.Stderr, "\rNo files transferred.")
+			fmt.Fprintf(os.Stderr, "\rNo files transferred.\n")
 		}
 	}
 	return
@@ -1194,10 +1209,10 @@ func (c *Client) processMessageFileInfo(m message.Message) (done bool, err error
 		if strings.Contains(c.FilesToTransfer[i].FolderRemote, ".ssh") {
 			return true, fmt.Errorf("invalid path detected: '%s'", fi.FolderRemote)
 		}
-		// Issue #595 - disallow filenames with anything but 0-9a-zA-Z.-_. and / characters
-
-		if !utils.ValidFileName(path.Join(c.FilesToTransfer[i].FolderRemote, fi.Name)) {
-			return true, fmt.Errorf("invalid filename detected: '%s'", fi.Name)
+		// Issue #595 - disallow filenames with invisible characters
+		errFileName := utils.ValidFileName(path.Join(c.FilesToTransfer[i].FolderRemote, fi.Name))
+		if errFileName != nil {
+			return true, errFileName
 		}
 	}
 	c.TotalNumberOfContents = 0
@@ -1624,6 +1639,7 @@ func (c *Client) recipientGetFileReady(finished bool) (err error) {
 		}
 		c.SuccessfulTransfer = true
 		c.FilesHasFinished[c.FilesToTransferCurrentNum] = struct{}{}
+		return
 	}
 
 	err = c.recipientInitializeFile()
@@ -1696,6 +1712,9 @@ func (c *Client) createEmptyFileAndFinish(fileInfo FileInfo, i int) (err error) 
 	} else {
 		description = " " + description
 	}
+	if len(description) > 20 {
+		description = description[:17] + "..."
+	}
 	c.bar = progressbar.NewOptions64(1,
 		progressbar.OptionOnCompletion(func() {
 			c.fmtPrintUpdate()
@@ -1757,13 +1776,13 @@ func (c *Client) updateIfRecipientHasFileInfo() (err error) {
 				percentDone := 100 - float64(len(missingChunks)*models.TCP_BUFFER_SIZE/2)/float64(fileInfo.Size)*100
 
 				log.Debug("asking to overwrite")
-				prompt := fmt.Sprintf("\nOverwrite '%s'? (y/N) ", path.Join(fileInfo.FolderRemote, fileInfo.Name))
+				prompt := fmt.Sprintf("\nOverwrite '%s'? (y/N) (use --overwrite to omit) ", path.Join(fileInfo.FolderRemote, fileInfo.Name))
 				if percentDone < 99 {
-					prompt = fmt.Sprintf("\nResume '%s' (%2.1f%%)? (y/N) ", path.Join(fileInfo.FolderRemote, fileInfo.Name), percentDone)
+					prompt = fmt.Sprintf("\nResume '%s' (%2.1f%%)? (y/N)   (use --overwrite to omit) ", path.Join(fileInfo.FolderRemote, fileInfo.Name), percentDone)
 				}
 				choice := strings.ToLower(utils.GetInput(prompt))
 				if choice != "y" && choice != "yes" {
-					fmt.Fprintf(os.Stderr, "skipping '%s'", path.Join(fileInfo.FolderRemote, fileInfo.Name))
+					fmt.Fprintf(os.Stderr, "Skipping '%s'\n", path.Join(fileInfo.FolderRemote, fileInfo.Name))
 					continue
 				}
 			}
@@ -1872,6 +1891,9 @@ func (c *Client) setBar() {
 	} else if !c.Options.IsSender {
 		description = " " + description
 	}
+	if len(description) > 20 {
+		description = description[:17] + "..."
+	}
 	c.bar = progressbar.NewOptions64(
 		c.FilesToTransfer[c.FilesToTransferCurrentNum].Size,
 		progressbar.OptionOnCompletion(func() {
@@ -1899,14 +1921,14 @@ func (c *Client) setBar() {
 }
 
 func (c *Client) receiveData(i int) {
-	log.Debugf("%d receiving data", i)
+	log.Tracef("%d receiving data", i)
 	for {
 		data, err := c.conn[i+1].Receive()
 		if err != nil {
 			break
 		}
 		if bytes.Equal(data, []byte{1}) {
-			log.Debug("got ping")
+			log.Trace("got ping")
 			continue
 		}
 

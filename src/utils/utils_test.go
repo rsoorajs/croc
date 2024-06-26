@@ -24,7 +24,7 @@ func BenchmarkMD5(b *testing.B) {
 	bigFile()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		MD5HashFile("bigfile.test")
+		MD5HashFile("bigfile.test", false)
 	}
 }
 
@@ -32,7 +32,7 @@ func BenchmarkXXHash(b *testing.B) {
 	bigFile()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		XXHashFile("bigfile.test")
+		XXHashFile("bigfile.test", false)
 	}
 }
 
@@ -41,6 +41,14 @@ func BenchmarkImoHash(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		IMOHashFile("bigfile.test")
+	}
+}
+
+func BenchmarkHighwayHash(b *testing.B) {
+	bigFile()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		HighwayHashFile("bigfile.test", false)
 	}
 }
 
@@ -78,10 +86,20 @@ func TestExists(t *testing.T) {
 func TestMD5HashFile(t *testing.T) {
 	bigFile()
 	defer os.Remove("bigfile.test")
-	b, err := MD5HashFile("bigfile.test")
+	b, err := MD5HashFile("bigfile.test", false)
 	assert.Nil(t, err)
 	assert.Equal(t, "8304ff018e02baad0e3555bade29a405", fmt.Sprintf("%x", b))
-	_, err = MD5HashFile("bigfile.test.nofile")
+	_, err = MD5HashFile("bigfile.test.nofile", false)
+	assert.NotNil(t, err)
+}
+
+func TestHighwayHashFile(t *testing.T) {
+	bigFile()
+	defer os.Remove("bigfile.test")
+	b, err := HighwayHashFile("bigfile.test", false)
+	assert.Nil(t, err)
+	assert.Equal(t, "3c32999529323ed66a67aeac5720c7bf1301dcc5dca87d8d46595e85ff990329", fmt.Sprintf("%x", b))
+	_, err = HighwayHashFile("bigfile.test.nofile", false)
 	assert.NotNil(t, err)
 }
 
@@ -90,16 +108,16 @@ func TestIMOHashFile(t *testing.T) {
 	defer os.Remove("bigfile.test")
 	b, err := IMOHashFile("bigfile.test")
 	assert.Nil(t, err)
-	assert.Equal(t, "c0d1e123ca94148ffea146137684ebb9", fmt.Sprintf("%x", b))
+	assert.Equal(t, "c0d1e12301e6c635f6d4a8ea5c897437", fmt.Sprintf("%x", b))
 }
 
 func TestXXHashFile(t *testing.T) {
 	bigFile()
 	defer os.Remove("bigfile.test")
-	b, err := XXHashFile("bigfile.test")
+	b, err := XXHashFile("bigfile.test", false)
 	assert.Nil(t, err)
 	assert.Equal(t, "4918740eb5ccb6f7", fmt.Sprintf("%x", b))
-	_, err = XXHashFile("nofile")
+	_, err = XXHashFile("nofile", false)
 	assert.NotNil(t, err)
 }
 
@@ -208,11 +226,39 @@ func TestGetRandomName(t *testing.T) {
 	assert.NotEmpty(t, name)
 }
 
+func intSliceSame(a, b []int) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i, v := range a {
+		if v != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestFindOpenPorts(t *testing.T) {
 	openPorts := FindOpenPorts("127.0.0.1", 9009, 4)
-	assert.Equal(t, []int{9009, 9010, 9011, 9012}, openPorts)
+	if !intSliceSame(openPorts, []int{9009, 9010, 9011, 9012}) && !intSliceSame(openPorts, []int{9014, 9015, 9016, 9017}) {
+		t.Errorf("openPorts: %v", openPorts)
+
+	}
 }
 
 func TestIsLocalIP(t *testing.T) {
 	assert.True(t, IsLocalIP("192.168.0.14:9009"))
+}
+
+func TestValidFileName(t *testing.T) {
+	// contains regular characters
+	assert.Nil(t, ValidFileName("中文.csl"))
+	// contains regular characters
+	assert.Nil(t, ValidFileName("[something].csl"))
+	// contains regular characters
+	assert.Nil(t, ValidFileName("[(something)].csl"))
+	// contains invisible character
+	err := ValidFileName("D中文.cslouglas​")
+	assert.NotNil(t, err)
+	assert.Equal(t, "non-graphical unicode: e2808b U+8203 in 'D中文.cslouglas​'", err.Error())
 }

@@ -15,11 +15,11 @@ import (
 
 	"github.com/chzyer/readline"
 	"github.com/schollz/cli/v2"
-	"github.com/schollz/croc/v9/src/comm"
-	"github.com/schollz/croc/v9/src/croc"
-	"github.com/schollz/croc/v9/src/models"
-	"github.com/schollz/croc/v9/src/tcp"
-	"github.com/schollz/croc/v9/src/utils"
+	"github.com/schollz/croc/v10/src/comm"
+	"github.com/schollz/croc/v10/src/croc"
+	"github.com/schollz/croc/v10/src/models"
+	"github.com/schollz/croc/v10/src/tcp"
+	"github.com/schollz/croc/v10/src/utils"
 	log "github.com/schollz/logger"
 	"github.com/schollz/mnemonicode"
 	"github.com/schollz/pake/v3"
@@ -36,12 +36,15 @@ func Run() (err error) {
 	app := cli.NewApp()
 	app.Name = "croc"
 	if Version == "" {
-		Version = "v9.6.17"
+		Version = "v10.0.9"
 	}
 	app.Version = Version
 	app.Compiled = time.Now()
 	app.Usage = "easily and securely transfer stuff from one computer to another"
-	app.UsageText = `Send a file:
+	app.UsageText = `croc [GLOBAL OPTIONS] [COMMAND] [COMMAND OPTIONS] [filename(s) or folder]
+
+   USAGE EXAMPLES:
+   Send a file:
       croc send file.txt
 
       -git to respect your .gitignore
@@ -92,6 +95,7 @@ func Run() (err error) {
 	}
 	app.Flags = []cli.Flag{
 		&cli.BoolFlag{Name: "internal-dns", Usage: "use a built-in DNS stub resolver rather than the host operating system"},
+		&cli.BoolFlag{Name: "classic", Usage: "toggle between the classic mode (insecure due to local attack vector) and new mode (secure)"},
 		&cli.BoolFlag{Name: "remember", Usage: "save these settings to reuse next time"},
 		&cli.BoolFlag{Name: "debug", Usage: "toggle debug mode"},
 		&cli.BoolFlag{Name: "yes", Usage: "automatically agree to all prompts"},
@@ -100,7 +104,7 @@ func Run() (err error) {
 		&cli.BoolFlag{Name: "ask", Usage: "make sure sender and recipient are prompted"},
 		&cli.BoolFlag{Name: "local", Usage: "force to use only local connections"},
 		&cli.BoolFlag{Name: "ignore-stdin", Usage: "ignore piped stdin"},
-		&cli.BoolFlag{Name: "overwrite", Usage: "do not prompt to overwrite"},
+		&cli.BoolFlag{Name: "overwrite", Usage: "do not prompt to overwrite or resume"},
 		&cli.BoolFlag{Name: "testing", Usage: "flag for testing purposes"},
 		&cli.StringFlag{Name: "curve", Value: "p256", Usage: "choose an encryption curve (" + strings.Join(pake.AvailableCurves(), ", ") + ")"},
 		&cli.StringFlag{Name: "ip", Value: "", Usage: "set sender ip if known e.g. 10.0.0.1:9009, [::1]:9009"},
@@ -125,6 +129,61 @@ func Run() (err error) {
 			return true
 		}
 
+		// check if "classic" is set
+		classicFile := getClassicConfigFile(true)
+		classicInsecureMode := utils.Exists(classicFile)
+		if c.Bool("classic") {
+			if classicInsecureMode {
+				// classic mode not enabled
+				fmt.Print(`Classic mode is currently ENABLED.
+				
+Disabling this mode will prevent the shared secret from being visible
+on the host's process list when passed via the command line. On a
+multi-user system, this will help ensure that other local users cannot
+access the shared secret and receive the files instead of the intended
+recipient.
+
+Do you wish to continue to DISABLE the classic mode? (y/N) `)
+				choice := strings.ToLower(utils.GetInput(""))
+				if choice == "y" || choice == "yes" {
+					os.Remove(classicFile)
+					fmt.Print("\nClassic mode DISABLED.\n\n")
+					fmt.Print(`To send and receive, export the CROC_SECRET variable with the code phrase:
+
+  Send:    CROC_SECRET=*** croc send file.txt
+
+  Receive: CROC_SECRET=*** croc` + "\n\n")
+				} else {
+					fmt.Print("\nClassic mode ENABLED.\n")
+
+				}
+			} else {
+				// enable classic mode
+				// touch the file
+				fmt.Print(`Classic mode is currently DISABLED.
+				
+Please note that enabling this mode will make the shared secret visible
+on the host's process list when passed via the command line. On a
+multi-user system, this could allow other local users to access the
+shared secret and receive the files instead of the intended recipient.
+
+Do you wish to continue to enable the classic mode? (Y/n) `)
+				choice := strings.ToLower(utils.GetInput(""))
+				if choice == "y" || choice == "yes" {
+					fmt.Print("\nClassic mode ENABLED.\n\n")
+					os.WriteFile(classicFile, []byte("enabled"), 0o644)
+					fmt.Print(`To send and receive, use the code phrase:
+
+  Send:    croc send --code *** file.txt
+
+  Receive: croc ***` + "\n\n")
+				} else {
+					fmt.Print("\nClassic mode DISABLED.\n")
+				}
+			}
+			os.Exit(0)
+		}
+
 		// if trying to send but forgot send, let the user know
 		if c.Args().Present() && allStringsAreFiles(c.Args().Slice()) {
 			fnames := []string{}
@@ -138,6 +197,7 @@ func Run() (err error) {
 				return send(c)
 			}
 		}
+
 		return receive(c)
 	}
 
@@ -160,6 +220,15 @@ func getSendConfigFile(requireValidPath bool) string {
 		return ""
 	}
 	return path.Join(configFile, "send.json")
+}
+
+func getClassicConfigFile(requireValidPath bool) string {
+	configFile, err := utils.GetConfigDir(requireValidPath)
+	if err != nil {
+		log.Error(err)
+		return ""
+	}
+	return path.Join(configFile, "classic_enabled")
 }
 
 func getReceiveConfigFile(requireValidPath bool) (string, error) {
@@ -304,6 +373,32 @@ func send(c *cli.Context) (err error) {
 		return errors.New("must specify file: croc send [filename(s) or folder]")
 	}
 
+	classicInsecureMode := utils.Exists(getClassicConfigFile(true))
+	if !classicInsecureMode {
+		// if operating system is UNIX, then use environmental variable to set the code
+		if (!(runtime.GOOS == "windows") && c.IsSet("code")) || os.Getenv("CROC_SECRET") != "" {
+			crocOptions.SharedSecret = os.Getenv("CROC_SECRET")
+			if crocOptions.SharedSecret == "" {
+				fmt.Printf(`On UNIX systems, to send with a custom code phrase, 
+you need to set the environmental variable CROC_SECRET:
+
+  export CROC_SECRET="****"
+  croc send file.txt
+
+Or you can have the code phrase automaticlaly generated:
+
+  croc send file.txt
+	
+Or you can go back to the classic croc behavior by enabling classic mode:
+
+  croc --classic
+
+`)
+				os.Exit(0)
+			}
+		}
+	}
+
 	if len(crocOptions.SharedSecret) == 0 {
 		// generate code phrase
 		crocOptions.SharedSecret = utils.GetRandomName()
@@ -311,19 +406,6 @@ func send(c *cli.Context) (err error) {
 	minimalFileInfos, emptyFoldersToTransfer, totalNumberFolders, err := croc.GetFilesInfo(fnames, crocOptions.ZipFolder, crocOptions.GitIgnore)
 	if err != nil {
 		return
-	}
-
-	// if operating system is UNIX, then use environmental variable to set the code
-	if runtime.GOOS == "linux" {
-		log.Debug("forcing code phrase from environmental variable")
-		crocOptions.SharedSecret = os.Getenv("CROC_SECRET")
-		if crocOptions.SharedSecret == "" {
-			fmt.Printf(`To use croc you need to set a code phrase using your environmental variables:
-
-export CROC_SECRET="yourcodephrasetouse"
-			`)
-			os.Exit(0)
-		}
 	}
 
 	cr, err := croc.New(crocOptions)
@@ -508,6 +590,32 @@ func receive(c *cli.Context) (err error) {
 		}
 	}
 
+	classicInsecureMode := utils.Exists(getClassicConfigFile(true))
+	if crocOptions.SharedSecret == "" && os.Getenv("CROC_SECRET") != "" {
+		crocOptions.SharedSecret = os.Getenv("CROC_SECRET")
+	} else if !(runtime.GOOS == "windows") && crocOptions.SharedSecret != "" && !classicInsecureMode {
+		crocOptions.SharedSecret = os.Getenv("CROC_SECRET")
+		if crocOptions.SharedSecret == "" {
+			fmt.Printf(`On UNIX systems, to receive with croc you either need 
+to set a code phrase using your environmental variables:
+	
+  export CROC_SECRET="****"
+  croc 
+
+Or you can specify the code phrase when you run croc without
+declaring the secret on the command line:
+
+  croc 
+  Enter receive code: ****
+
+Or you can go back to the classic croc behavior by enabling classic mode:
+
+  croc --classic
+
+`)
+			os.Exit(0)
+		}
+	}
 	if crocOptions.SharedSecret == "" {
 		l, err := readline.NewEx(&readline.Config{
 			Prompt:       "Enter receive code: ",
@@ -524,17 +632,6 @@ func receive(c *cli.Context) (err error) {
 	if c.String("out") != "" {
 		if err = os.Chdir(c.String("out")); err != nil {
 			return err
-		}
-	}
-	// if operating system is UNIX, then use environmental variable to set the code
-	if runtime.GOOS == "linux" {
-		crocOptions.SharedSecret = os.Getenv("CROC_SECRET")
-		if crocOptions.SharedSecret == "" {
-			fmt.Printf(`To use croc you need to set a code phrase using your environmental variables:
-	
-	export CROC_SECRET="yourcodephrasetouse"
-				`)
-			os.Exit(0)
 		}
 	}
 
